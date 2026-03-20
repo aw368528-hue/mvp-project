@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MDR Safety Hub</title>
+
+<script src="https://unpkg.com/@zxing/library@latest"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+<style>
+body{margin:0;font-family:Arial;background:#eef1f5;text-align:center;}
+.app{max-width:420px;margin:auto;background:white;min-height:100vh;padding-bottom:30px;}
+button{width:90%;margin:10px;padding:15px;font-size:18px;border:none;border-radius:10px;color:white;}
+.primary{background:#2c5ea8;}
+.scan{background:#2e8b7f;}
+.stop{background:#7d8793;}
+.end{background:#c0392b;}
+video{width:90%;border-radius:12px;margin-top:10px;}
+.scanlist{margin:20px;padding:10px;text-align:left;}
+.scanitem{padding:6px 0;border-bottom:1px solid #eee;}
+#status{margin-top:10px;font-size:14px;}
+.overlay{
+position:absolute;
+top:50%;
+left:50%;
+transform:translate(-50%,-50%);
+width:60%;
+height:120px;
+border:2px solid red;
+border-radius:10px;
+pointer-events:none;
+}
+.video-wrap{position:relative;}
+</style>
+</head>
+
+<body>
+
+<div class="app">
+
+<h2>MDR Safety Hub</h2>
+<div>Klinika: <b id="klinika">...</b></div>
+
+<button class="primary" onclick="nowyZabieg()">NOWY ZABIEG</button>
+
+<div id="status">Gotowy</div>
+
+<div class="video-wrap">
+<video id="video"></video>
+<div class="overlay"></div>
+</div>
+
+<button class="scan" onclick="startScanner()">START SKAN</button>
+<button class="stop" onclick="stopScanner()">STOP SKAN</button>
+<button class="end" onclick="zakonczZabieg()">ZAKOŃCZ</button>
+
+<button class="primary" onclick="pobierzHistorie()">HISTORIA</button>
+
+<div class="scanlist" id="lista"></div>
+
+</div>
+
+<script>
+
+let currentZabieg=false
+let currentZabiegId=null
+let scannerControls=null
+let scanningActive=false
+let lastScanTime=0
+let zeskanowane=new Set()
+let skany=[]
+
+function generateUUID(){
+return crypto.randomUUID()
+}
+
+// 🔊 BEEP
+function beep(){
+const ctx = new AudioContext()
+const osc = ctx.createOscillator()
+osc.type = "sine"
+osc.frequency.value = 1000
+osc.connect(ctx.destination)
+osc.start()
+osc.stop(ctx.currentTime + 0.1)
+}
+
+const SUPABASE_URL="https://ujdkrkblkmvpashexpjb.supabase.co"
+const SUPABASE_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVqZGtya2Jsa212cGFzaGV4cGpiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM3NzQwMDYsImV4cCI6MjA4OTM1MDAwNn0.Jyx_VqIXfkIUuGhX9Mhk64_x9Tauv5cVap1mrG-5n9Y"
+
+const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY)
+
+// 🔥 NAJLEPSZY READER
+const codeReader = new ZXing.BrowserBarcodeReader()
+
+function showStatus(msg){
+document.getElementById("status").innerText=msg
+}
+
+// klinika
+const params=new URLSearchParams(window.location.search)
+const klinika=params.get("klinika") || "demo"
+document.getElementById("klinika").innerText=klinika
+
+// NOWY ZABIEG
+async function nowyZabieg(){
+
+currentZabieg = true
+currentZabiegId = generateUUID()
+
+// 🔥 DODAJ TO
+const { error } = await supabaseClient
+.from("zabiegi")
+.insert({
+  id: currentZabiegId,
+  kod_kliniki: klinika,
+  created_at: new Date().toISOString()
+})
+
+// 🔥 LOGI (oba!)
+console.log("TWORZE ZABIEG:", currentZabiegId)
+
+if(error){
+  showStatus("Błąd tworzenia zabiegu")
+  console.log("ERROR:", error)
+  return
+}
+
+zeskanowane.clear()
+skany=[]
+document.getElementById("lista").innerHTML=""
+
+showStatus("Nowy zabieg OK")
+}
+
+// START
+async function startScanner(){
+
+if(!currentZabieg){
+showStatus("Najpierw NOWY ZABIEG")
+return
+}
+
+if(scanningActive){
+showStatus("Już działa")
+return
+}
+
+scanningActive=true
+
+try{
+
+const video=document.getElementById("video")
+
+scannerControls = await codeReader.decodeFromConstraints(
+{
+video:{
+facingMode:"environment",
+width:{ideal:1920},
+height:{ideal:1080},
+advanced:[{zoom:2}] // 🔥 AUTO ZOOM (jeśli wspierany)
+}
+},
+video,
+(result)=>{
+
+if(!scanningActive || !result) return
+
+if(Date.now()-lastScanTime<600) return
+lastScanTime=Date.now()
+
+const kod=result.text
+
+// 🚫 DUPLIKATY
+if(zeskanowane.has(kod)){
+showStatus("Duplikat")
+return
+}
+
+zeskanowane.add(kod)
+
+// 🔊 dźwięk
+beep()
+
+dodaj(kod)
+
+skany.push({
+kod:kod,
+czas:new Date()
+})
+
+showStatus("OK")
+
+})
+
+}catch(e){
+showStatus("Kamera error")
+console.log(e)
+}
+}
+
+// STOP
+async function stopScanner(){
+
+scanningActive=false
+
+try{
+if(scannerControls){
+await scannerControls.stop()
+scannerControls=null
+}
+
+codeReader.reset()
+
+const video=document.getElementById("video")
+if(video.srcObject){
+video.srcObject.getTracks().forEach(t=>t.stop())
+video.srcObject=null
+}
+
+showStatus("STOP")
+
+}catch(e){
+console.log(e)
+}
+}
+
+// ZAKOŃCZ
+async function zakonczZabieg(){
+
+await stopScanner()
+
+if(skany.length===0){
+showStatus("Brak skanów")
+return
+}
+
+try{
+
+const payload = skany.map(s=>({
+kod_udi:s.kod,
+czas_skanu:s.czas,
+kod_kliniki:klinika,
+zabieg_id:currentZabiegId || crypto.randomUUID()
+}))
+
+const {error}=await supabaseClient
+.from("skany_produktow")
+.insert(payload)
+
+if(error){
+showStatus("Błąd zapisu")
+console.log(error)
+return
+}
+
+showStatus("Zapis OK")
+
+}catch(e){
+showStatus("Błąd systemu")
+console.log(e)
+}
+
+currentZabieg=false
+currentZabiegId=null
+skany=[]
+}
+
+// HISTORIA
+async function pobierzHistorie(){
+
+const {data}=await supabaseClient
+.from("skany_produktow")
+.select("*")
+.eq("kod_kliniki",klinika)
+.order("czas_skanu",{ascending:false})
+
+const lista=document.getElementById("lista")
+lista.innerHTML=""
+
+data.forEach(i=>{
+const el=document.createElement("div")
+el.className="scanitem"
+el.innerText=i.kod_udi
+lista.appendChild(el)
+})
+
+showStatus("Historia OK")
+}
+
+// UI
+function dodaj(kod){
+const el=document.createElement("div")
+el.className="scanitem"
+el.innerText="🕒 "+new Date().toLocaleTimeString()+" | "+kod
+document.getElementById("lista").prepend(el)
+}
+
+</script>
+
+</body>
+</html>
